@@ -1,18 +1,16 @@
 """
 Script for Dataset Utilities
 """
+from .ClassAverages import ClassAverages
+from library.Calib import get_P
+from torch.utils import data
+from torchvision import transforms
+import torch
+import cv2
+import numpy as np
 import os
 import sys
 from pathlib import Path
-
-import numpy as np
-import cv2
-import torch
-from torchvision import transforms
-from torch.utils import data
-
-from library.Calib import get_P
-from ClassAverages import ClassAverages
 
 FILE = Path(__file__).resolve()
 ROOT = FILE.parents[0]  # YOLOv5 root directory
@@ -38,10 +36,6 @@ class Dataset(data.Dataset):
         self.right_image_path = os.path.join(path, 'image_3')
         self.label_path = os.path.join(path, 'label_2')
         self.local_calib_path = os.path.join(path, 'calib')
-
-        # Global Calibration file
-        self.global_calib = os.path.join(path, 'calib_cam_to_cam.txt')
-        self.proj_matrix = get_P(self.global_calib)
 
         # Get index of image_2 files
         self.ids = [x.split('.')[0]
@@ -85,6 +79,7 @@ class Dataset(data.Dataset):
         self.curr_id = ""
         self.curr_img_2 = None
         self.curr_img_disparity = None
+        self.proj_matrix = None
 
     def __getitem__(self, index):
         id = self.object_list[index][0]
@@ -92,7 +87,6 @@ class Dataset(data.Dataset):
 
         if id != self.curr_id:
             self.curr_id = id
-            # Read image (.png)
             left_img = cv2.imread(os.path.join(
                 self.left_image_path, f'{id}.png'))
             right_img = cv2.imread(os.path.join(
@@ -104,12 +98,16 @@ class Dataset(data.Dataset):
             self.curr_img_2 = left_img.copy()
             self.curr_img_disparity = self.disparity(left_img, right_img)
 
+            # Load the calibration matrix for the current image
+            calib_file_path = os.path.join(self.local_calib_path, f'{id}.txt')
+            self.proj_matrix = get_P(calib_file_path)
+
         label = self.labels[id][str(line_num)]
 
         obj = DetectedObject(
-            self.curr_img_2, label['Class'], label['Box_2D'], self.proj_matrix, label=label)
+            self.curr_img_2, self.curr_img_disparity, label['Class'], label['Box_2D'], self.proj_matrix, label=label)
 
-        return obj.img, label
+        return obj.combined, label
 
     def __len__(self):
         return len(self.object_list)
@@ -248,12 +246,12 @@ class DetectedObject:
 
         self.proj_matrix = proj_matrix
         self.theta_ray = self.calc_theta_ray(img, box_2d, proj_matrix)
-        self.img = self.format_img(img, box_2d)
-        self.disparity_map = self.format_disparity_map(
-            disparity_map, box_2d)  # New line for disparity map
+        self.img, self.disparity = self.format_img_and_disparity(
+            img, disparity_map, box_2d)
+        self.combined = self.combine_inputs(self.img, self.disparity)
+
         self.label = label
         self.detection_class = detection_class
-        self.combined_input = self.combine_inputs(self.img, self.disparity_map)
 
     def calc_theta_ray(self, img, box_2d, proj_matrix):
         """
@@ -263,58 +261,67 @@ class DetectedObject:
         # Angle of View: fovx (rad) => 3.14
         fovx = 2 * np.arctan(width / (2 * proj_matrix[0][0]))
         center = (box_2d[1][0] + box_2d[0][0]) / 2
-        dx = center - (width/2)
+        dx = center - (width / 2)
 
         mult = 1
         if dx < 0:
             mult = -1
         dx = abs(dx)
-        angle = np.arctan((2*dx*np.tan(fovx/2)) / width)
+        angle = np.arctan((2 * dx * np.tan(fovx / 2)) / width)
         angle = angle * mult
 
         return angle
 
-    def format_img(self, img, box_2d):
-        # transforms
-        normalize = transforms.Normalize(
+    def format_img_and_disparity(self, img, disparity_map, box_2d):
+        # Transforms
+        normalize_img = transforms.Normalize(
             mean=[0.485, 0.456, 0.406],
-            std=[0.229, 0.224, 0.225])
+            std=[0.229, 0.224, 0.225]
+        )
 
-        process = transforms.Compose([
+        normalize_disp = transforms.Normalize(
+            mean=[0.5],
+            std=[0.5]
+        )
+
+        process_img = transforms.Compose([
             transforms.ToTensor(),
-            normalize
+            normalize_img
         ])
 
-        # crop image
+        process_disp = transforms.Compose([
+            transforms.ToTensor(),
+            normalize_disp
+        ])
+
+        # Crop image
         pt1, pt2 = box_2d[0], box_2d[1]
-        crop = img[pt1[1]:pt2[1]+1, pt1[0]:pt2[0]+1]
-        crop = cv2.resize(crop, (224, 224), interpolation=cv2.INTER_CUBIC)
+        crop_img = img[pt1[1]:pt2[1]+1, pt1[0]:pt2[0]+1]
+        crop_img = cv2.resize(crop_img, (224, 224),
+                              interpolation=cv2.INTER_CUBIC)
 
-        # apply transform for batch
-        batch = process(crop)
+        # Crop disparity map
+        crop_disp = disparity_map[pt1[1]:pt2[1]+1, pt1[0]:pt2[0]+1]
+        crop_disp = cv2.resize(crop_disp, (224, 224),
+                               interpolation=cv2.INTER_CUBIC)
+        crop_disp = cv2.normalize(crop_disp, None, 0, 1, cv2.NORM_MINMAX)
 
-        return batch
+        # Apply transforms for batch processing
+        batch_img = process_img(crop_img)
+        batch_disp = process_disp(crop_disp)
 
-    def format_disparity_map(self, disparity_map, box_2d):
-        # Crop and resize disparity map to match the image input size
-        pt1, pt2 = box_2d[0], box_2d[1]
-        crop = disparity_map[pt1[1]:pt2[1]+1, pt1[0]:pt2[0]+1]
-        crop = cv2.resize(crop, (224, 224), interpolation=cv2.INTER_CUBIC)
-
-        # Normalize the disparity map
-        crop = cv2.normalize(crop, None, 0, 1, cv2.NORM_MINMAX)
-
-        # Convert to tensor
-        crop_tensor = transforms.ToTensor()(crop)
-
-        return crop_tensor
+        return batch_img, batch_disp
 
     def combine_inputs(self, img_tensor, disparity_tensor):
-        # Concatenate along the channel dimension (assuming img_tensor is [C, H, W] and disparity_tensor is [1, H, W])
-        disparity_tensor = disparity_tensor.unsqueeze(
-            0)
-        combined = torch.cat(
-            (img_tensor, disparity_tensor), dim=0)
+        # Concatenate the RGB image and the disparity map into a single 4-channel tensor
+        # Ensure disparity_tensor is in the correct shape for concatenation
+        # disparity_tensor should be (1, 224, 224) after ToTensor
+        # We can add a new dimension to match the expected input shape
+        disparity_tensor = disparity_tensor.unsqueeze(0)
+
+        # Concatenate along the channel dimension
+        # Result shape: (4, 224, 224)
+        combined = torch.cat((img_tensor, disparity_tensor), dim=0)
 
         return combined
 
