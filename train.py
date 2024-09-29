@@ -2,6 +2,7 @@
 Script for training Regressor Model
 """
 
+from comet_ml import Experiment
 from torch.utils import data
 from torchvision.models import resnet18
 import torch.nn as nn
@@ -11,7 +12,6 @@ import sys
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
-from comet_ml import Experiment
 import argparse
 
 from script.Model import ResNet18, OrientationLoss
@@ -93,7 +93,7 @@ def train(
     # Loss functions
     conf_loss_func = nn.CrossEntropyLoss().to(device)
     dim_loss_func = nn.MSELoss().to(device)
-    orient_loss_func = OrientationLoss().to(device)  # Ensure correct initialization
+    orient_loss_func = OrientationLoss
 
     # Load previous weights
     latest_model = None
