@@ -20,6 +20,13 @@ def get_projection_matrix(cam_idx, calib_file):
     file_not_found(calib_file)
 
 
+def get_P(calib_file):
+    """
+    Get the projection matrix P_rect_00 for the first camera (RGB camera).
+    """
+    return get_projection_matrix(0, calib_file)
+
+
 def get_R0(calib_file):
     """
     Get the rectification rotation matrix R0.

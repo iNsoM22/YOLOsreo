@@ -2,7 +2,7 @@
 Script for Dataset Utilities
 """
 from .ClassAverages import ClassAverages
-from library.Calib import get_P
+from utilities.Calib import get_P
 from torch.utils import data
 from torchvision import transforms
 import torch
